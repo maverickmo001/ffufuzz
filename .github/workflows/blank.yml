@@ -28,7 +28,7 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          sudo apt-get update && sudo apt-get install -y jq libpcap-dev enscript ghostscript zip
+          sudo apt-get update && sudo apt-get install -y jq libpcap-dev
           
           if [ ! -f "${{ github.event.inputs.wordlist }}" ]; then
             echo "ERROR: Wordlist ${{ github.event.inputs.wordlist }} not found in repository!"
@@ -65,7 +65,7 @@ jobs:
         run: |
           TARGET_COUNT=$(wc -l < targets.txt | xargs)
           WORDLIST="${{ github.event.inputs.wordlist }}"
-          MESSAGE="🔫 FFUF Fuzzing Pipeline Starting"$'\n'$'\n'"Domains: ${TARGET_COUNT}"$'\n'"Wordlist: ${WORDLIST}"$'\n'"Filter: 200-500 Status (Excluding 404)"
+          MESSAGE="🔫 FFUF Fuzzing Pipeline Starting"$'\n'$'\n'"Domains: ${TARGET_COUNT}"$'\n'"Wordlist: ${WORDLIST}"
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MESSAGE}" || true
@@ -87,9 +87,6 @@ jobs:
             touch "$SUBS"
             
             if [ -s "$SUBS" ]; then
-              enscript -p "${safe_name}_subs.ps" "$SUBS" || true
-              ps2pdf "${safe_name}_subs.ps" "${safe_name}_subs.pdf" || true
-              
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
                 --data-urlencode "text=✅ Step 1: Subfinder finished for ${target}" || true
@@ -97,10 +94,6 @@ jobs:
                 -F chat_id="${TELEGRAM_CHAT_ID}" \
                 -F document="@${SUBS}" \
                 -F caption="📄 Subdomains - ${target}" || true
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-                -F chat_id="${TELEGRAM_CHAT_ID}" \
-                -F document="@${safe_name}_subs.pdf" \
-                -F caption="📑 Subdomains PDF - ${target}" || true
             else
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
@@ -130,9 +123,6 @@ jobs:
             touch "$LIVE"
             
             if [ -s "$LIVE" ]; then
-              enscript -p "${safe_name}_live.ps" "$LIVE" || true
-              ps2pdf "${safe_name}_live.ps" "${safe_name}_live.pdf" || true
-              
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
                 --data-urlencode "text=✅ Step 2: Httpx found live URLs for ${target}" || true
@@ -140,10 +130,6 @@ jobs:
                 -F chat_id="${TELEGRAM_CHAT_ID}" \
                 -F document="@${LIVE}" \
                 -F caption="📄 Live URLs - ${target}" || true
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-                -F chat_id="${TELEGRAM_CHAT_ID}" \
-                -F document="@${safe_name}_live.pdf" \
-                -F caption="📑 Live URLs PDF - ${target}" || true
             else
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
@@ -165,10 +151,6 @@ jobs:
             if [ -z "$target" ]; then continue; fi
             safe_name=$(echo "$target" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c 1-50)
             LIVE="${{ github.workspace }}/${safe_name}_live.txt"
-            FFUF_OUT="${{ github.workspace }}/${safe_name}_ffuf.txt"
-            FFUF_HTML="${{ github.workspace }}/${safe_name}_ffuf.html"
-            FFUF_PDF="${{ github.workspace }}/${safe_name}_ffuf.pdf"
-            FFUF_ZIP="${{ github.workspace }}/${safe_name}_ffuf.zip"
             
             echo ">>> RUNNING FFUF FOR $target"
             if [ ! -s "$LIVE" ]; then
@@ -176,59 +158,37 @@ jobs:
               continue
             fi
             
-            echo "Starting FFUF fuzzing..." > "$FFUF_OUT"
-            
-            # Loop through each live URL
+            # Loop through each live subdomain URL
             while IFS= read -r url; do
               if [ -z "$url" ]; then continue; fi
               
+              # Create a safe filename based on the subdomain URL
+              url_safe_name=$(echo "$url" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c 1-70)
+              FFUF_OUT="${{ github.workspace }}/${url_safe_name}_ffufresults.txt"
+              
               # Remove trailing slash for clean fuzzing
               clean_url=$(echo "$url" | sed 's:/*$::')
+              echo ">>> Fuzzing subdomain: ${clean_url}"
               
-              echo "======================================" >> "$FFUF_OUT"
-              echo "FUZZING TARGET: ${clean_url}/FUZZ" >> "$FFUF_OUT"
-              echo "======================================" >> "$FFUF_OUT"
-              
-              # Run FFUF with raw verbose output
-              # -nc: No Color (fixes the broken text file issue)
+              # Run FFUF with raw output directly to txt file
+              # -nc: No Color (prevents terminal color gibberish in text files)
               # -v: Verbose (shows full URL, size, words, status)
-              # -mc 200-500 -fc 404: Match 200-500, exclude 404
-              ffuf -u "${clean_url}/FUZZ" -w "$WORDLIST" -mc 200-500 -fc 404 -t 50 -rate 100 -ac -maxtime 300 -v -nc | tee -a "$FFUF_OUT" || true
+              # 2>&1 | tee: Captures EVERYTHING (including progress and headers) exactly as seen in terminal
+              ffuf -u "${clean_url}/FUZZ" -w "$WORDLIST" -mc 200-500 -fc 404 -t 50 -rate 100 -ac -maxtime 300 -v -nc 2>&1 | tee "$FFUF_OUT" || true
               
-              echo "" >> "$FFUF_OUT"
+              # Send the raw txt file to Telegram
+              if [ -f "$FFUF_OUT" ] && [ -s "$FFUF_OUT" ]; then
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
+                  -F chat_id="${TELEGRAM_CHAT_ID}" \
+                  -F document="@${FFUF_OUT}" \
+                  -F caption="🔫 FFUF Raw Results - ${url_safe_name}" || true
+              else
+                curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                  -d chat_id="${TELEGRAM_CHAT_ID}" \
+                  --data-urlencode "text=⚠️ FFUF finished but generated 0 output for ${clean_url}." || true
+              fi
+              
             done < "$LIVE"
-            
-            # Generate Reports
-            if [ -s "$FFUF_OUT" ]; then
-              # Create HTML Report
-              echo "<html><head><title>FFUF Report - ${target}</title><style>body{font-family:monospace;background:#1e1e1e;color:#d4d4d4}pre{background:#2d2d2d;padding:10px;border-radius:5px}</style></head><body>" > "$FFUF_HTML"
-              echo "<h1>FFUF Fuzzing Report for ${target}</h1>" >> "$FFUF_HTML"
-              echo "<h3>Filter: Status 200-500 (Excluding 404) | Wordlist: ${WORDLIST_INPUT}</h3><pre>" >> "$FFUF_HTML"
-              cat "$FFUF_OUT" >> "$FFUF_HTML"
-              echo "</pre></body></html>" >> "$FFUF_HTML"
-              
-              # Create PDF
-              enscript -p "${safe_name}_ffuf.ps" "$FFUF_OUT" || true
-              ps2pdf "${safe_name}_ffuf.ps" "$FFUF_PDF" || true
-              
-              # Zip all formats
-              zip -r "$FFUF_ZIP" "$FFUF_OUT" "$FFUF_HTML" "$FFUF_PDF" || true
-            fi
-
-            # Send to Telegram
-            if [ -f "$FFUF_ZIP" ] && [ -s "$FFUF_ZIP" ]; then
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" \
-                --data-urlencode "text=🚨 Step 3: FFUF found working paths for ${target}!" || true
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
-                -F chat_id="${TELEGRAM_CHAT_ID}" \
-                -F document="@${FFUF_ZIP}" \
-                -F caption="🔫 FFUF Raw Results (TXT, HTML, PDF) - ${target}" || true
-            else
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${TELEGRAM_CHAT_ID}" \
-                --data-urlencode "text=✅ Step 3: FFUF finished but found 0 valid paths for ${target}." || true
-            fi
           done < "$TARGET_FILE"
 
       - name: Pipeline Finished
