@@ -176,8 +176,7 @@ jobs:
               continue
             fi
             
-            # Create empty clean output file
-            > "$FFUF_OUT"
+            echo "Starting FFUF fuzzing..." > "$FFUF_OUT"
             
             # Loop through each live URL
             while IFS= read -r url; do
@@ -185,38 +184,28 @@ jobs:
               
               # Remove trailing slash for clean fuzzing
               clean_url=$(echo "$url" | sed 's:/*$::')
-              echo "Fuzzing: ${clean_url}/FUZZ"
               
-              # Run FFUF silently, output to JSON to avoid terminal junk
-              ffuf -u "${clean_url}/FUZZ" -w "$WORDLIST" -mc 200-500 -fc 404 -t 50 -rate 100 -ac -maxtime 300 -o "ffuf_temp.json" -of json -silent 2>/dev/null || true
+              echo "======================================" >> "$FFUF_OUT"
+              echo "FUZZING TARGET: ${clean_url}/FUZZ" >> "$FFUF_OUT"
+              echo "======================================" >> "$FFUF_OUT"
               
-              # Extract ONLY the clean working URLs from the JSON and append to our final list
-              if [ -f "ffuf_temp.json" ] && [ -s "ffuf_temp.json" ]; then
-                jq -r '.results[]? | .url // empty' "ffuf_temp.json" >> "$FFUF_OUT"
-              fi
+              # Run FFUF with raw verbose output
+              # -nc: No Color (fixes the broken text file issue)
+              # -v: Verbose (shows full URL, size, words, status)
+              # -mc 200-500 -fc 404: Match 200-500, exclude 404
+              ffuf -u "${clean_url}/FUZZ" -w "$WORDLIST" -mc 200-500 -fc 404 -t 50 -rate 100 -ac -maxtime 300 -v -nc | tee -a "$FFUF_OUT" || true
               
-              # Clean up temp file for next loop
-              rm -f "ffuf_temp.json"
-              
+              echo "" >> "$FFUF_OUT"
             done < "$LIVE"
-            
-            # Remove duplicate URLs
-            if [ -s "$FFUF_OUT" ]; then
-              sort -u "$FFUF_OUT" -o "$FFUF_OUT"
-            fi
             
             # Generate Reports
             if [ -s "$FFUF_OUT" ]; then
-              # Create HTML Report with clickable links
-              echo "<html><head><title>FFUF Report - ${target}</title><style>body{font-family:Arial;background:#f4f4f4;padding:20px}a{color:#007BFF;text-decoration:none;font-size:16px}a:hover{text-decoration:underline}</style></head><body>" > "$FFUF_HTML"
+              # Create HTML Report
+              echo "<html><head><title>FFUF Report - ${target}</title><style>body{font-family:monospace;background:#1e1e1e;color:#d4d4d4}pre{background:#2d2d2d;padding:10px;border-radius:5px}</style></head><body>" > "$FFUF_HTML"
               echo "<h1>FFUF Fuzzing Report for ${target}</h1>" >> "$FFUF_HTML"
-              echo "<h3>Filter: Status 200-500 (Excluding 404) | Wordlist: ${WORDLIST_INPUT}</h3>" >> "$FFUF_HTML"
-              
-              while IFS= read -r found_url; do
-                echo "<p><a href='${found_url}'>${found_url}</a></p>" >> "$FFUF_HTML"
-              done < "$FFUF_OUT"
-              
-              echo "</body></html>" >> "$FFUF_HTML"
+              echo "<h3>Filter: Status 200-500 (Excluding 404) | Wordlist: ${WORDLIST_INPUT}</h3><pre>" >> "$FFUF_HTML"
+              cat "$FFUF_OUT" >> "$FFUF_HTML"
+              echo "</pre></body></html>" >> "$FFUF_HTML"
               
               # Create PDF
               enscript -p "${safe_name}_ffuf.ps" "$FFUF_OUT" || true
@@ -234,7 +223,7 @@ jobs:
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument" \
                 -F chat_id="${TELEGRAM_CHAT_ID}" \
                 -F document="@${FFUF_ZIP}" \
-                -F caption="🔫 FFUF Clean Results (TXT, HTML, PDF) - ${target}" || true
+                -F caption="🔫 FFUF Raw Results (TXT, HTML, PDF) - ${target}" || true
             else
               curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d chat_id="${TELEGRAM_CHAT_ID}" \
