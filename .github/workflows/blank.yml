@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       domains:
-        description: 'Domains separated by / (e.g., f.com/j.com/x.com)'
+        description: 'Domains separated by / (e.g., f.com/j.com/x.com) - Skipped if Direct URLs are provided'
+        required: false
+        type: string
+      live_urls:
+        description: 'Paste Direct Live URLs here to SKIP Subfinder/Httpx (e.g., http://sub.jf.comhttps://dub.jf.com)'
         required: false
         type: string
       file_path:
@@ -42,7 +46,32 @@ jobs:
           go install github.com/ffuf/ffuf/v2@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Prepare Targets
+      - name: Prepare Direct Live URLs (Skips Subfinder/Httpx)
+        env:
+          INPUT_LIVE_URLS: ${{ github.event.inputs.live_urls }}
+        run: |
+          if [ -n "$INPUT_LIVE_URLS" ]; then
+            echo "Direct URLs provided. Organizing and skipping Subfinder/Httpx..."
+            touch raw_direct_urls.txt
+            
+            # Fix mashed URLs by adding newlines before http:// or https://
+            echo "$INPUT_LIVE_URLS" | sed 's/https:/\nhttps:/g' | sed 's/http:/\nhttp:/g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sort -u > raw_direct_urls.txt
+          
+            # Group them by domain for the separate txt files
+            while IFS= read -r url; do
+              if [ -z "$url" ]; then continue; fi
+              # Extract the domain from the URL (e.g., http://sub.jf.com/path -> sub.jf.com)
+              domain=$(echo "$url" | awk -F[/:] '{print $4}')
+              safe_name=$(echo "$domain" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c 1-50)
+              
+              # Append URL to the domain's specific live file
+              echo "$url" >> "${{ github.workspace }}/${safe_name}_live.txt"
+            done < raw_direct_urls.txt
+          else
+            echo "No direct URLs provided. Will use Subfinder/Httpx."
+          fi
+
+      - name: Prepare Domain Targets
         env:
           INPUT_PROMPTS: ${{ github.event.inputs.domains }}
           INPUT_FILE: ${{ github.event.inputs.file_path }}
@@ -55,22 +84,25 @@ jobs:
             cat "$INPUT_FILE" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' >> targets.txt
           fi
           sort -u targets.txt -o targets.txt
-          TARGET_COUNT=$(wc -l < targets.txt | xargs)
-          echo "Total domains loaded: ${TARGET_COUNT}"
 
       - name: Notify Telegram Start
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          TARGET_COUNT=$(wc -l < targets.txt | xargs)
           WORDLIST="${{ github.event.inputs.wordlist }}"
-          MESSAGE="🔫 FFUF Fuzzing Pipeline Starting"$'\n'$'\n'"Domains: ${TARGET_COUNT}"$'\n'"Wordlist: ${WORDLIST}"
+          if [ -n "${{ github.event.inputs.live_urls }}" ]; then
+            MESSAGE="🔫 FFUF Pipeline Starting"$'\n'$'\n'"Mode: Direct URLs (Skipping Subfinder/Httpx)"$'\n'"Wordlist: ${WORDLIST}"
+          else
+            TARGET_COUNT=$(wc -l < targets.txt | xargs)
+            MESSAGE="🔫 FFUF Pipeline Starting"$'\n'$'\n'"Mode: Full Scan (Subfinder -> Httpx -> FFUF)"$'\n'"Domains: ${TARGET_COUNT}"$'\n'"Wordlist: ${WORDLIST}"
+          fi
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
             --data-urlencode "text=${MESSAGE}" || true
 
       - name: Step 1 - Run Subfinder
+        if: github.event.inputs.live_urls == ''
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -102,6 +134,7 @@ jobs:
           done < "$TARGET_FILE"
 
       - name: Step 2 - Run Httpx
+        if: github.event.inputs.live_urls == ''
         continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -144,25 +177,19 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           WORDLIST_INPUT: ${{ github.event.inputs.wordlist }}
         run: |
-          TARGET_FILE="${{ github.workspace }}/targets.txt"
           WORDLIST="${{ github.workspace }}/${WORDLIST_INPUT}"
           
-          while IFS= read -r target; do
-            if [ -z "$target" ]; then continue; fi
-            safe_name=$(echo "$target" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c 1-50)
-            LIVE="${{ github.workspace }}/${safe_name}_live.txt"
+          # Find ALL live URL files (works for both Direct URLs and Httpx generated ones)
+          for LIVE_FILE in ${{ github.workspace }}/*_live.txt; do
+            if [ ! -f "$LIVE_FILE" ]; then continue; fi
             
-            echo ">>> RUNNING FFUF FOR $target"
-            if [ ! -s "$LIVE" ]; then
-              echo "No live URLs to fuzz for $target"
-              continue
-            fi
+            echo ">>> Found live file: $LIVE_FILE"
             
-            # Loop through each live subdomain URL
+            # Loop through each live subdomain URL in the file
             while IFS= read -r url; do
               if [ -z "$url" ]; then continue; fi
               
-              # Create safe filenames
+              # Create safe filenames based on the URL
               url_safe_name=$(echo "$url" | sed 's/[^a-zA-Z0-9]/_/g' | cut -c 1-70)
               FFUF_RAW="${{ github.workspace }}/${url_safe_name}_raw.txt"
               FFUF_CLEAN="${{ github.workspace }}/${url_safe_name}_clean.txt"
@@ -206,8 +233,8 @@ jobs:
                   --data-urlencode "text=⚠️ FFUF finished but found 0 valid paths for ${clean_url}." || true
               fi
               
-            done < "$LIVE"
-          done < "$TARGET_FILE"
+            done < "$LIVE_FILE"
+          done
 
       - name: Pipeline Finished
         env:
